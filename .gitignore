@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------- datasets (regenerate locally)
+# Raw Kaggle download, prepared page images/OCR TSVs, noisy re-OCR'd copies, synthetic data, OCR caches.
+#   python prepare_data.py    -> data/company_docs/
+#   python prepare_noisy.py   -> data/*_noisy/
+#   synthetic data is generated on first use -> data/synthetic/
+data/
+
+# ---------------------------------------------------------------- model weights and run outputs
+# Trained pipelines (backbone + LoRA adapters + heads, fp16 safetensors), checkpoints, caches.
+artifacts/
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.ckpt
+
+# ---------------------------------------------------------------- Python / tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+*.egg-info/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

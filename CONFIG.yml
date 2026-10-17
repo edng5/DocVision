@@ -1,0 +1,104 @@
+# =============================================================================
+# lmv3docs — LayoutLMv3 backbone + LoRA task adapters for document AI
+# Override any key on the CLI:  python train.py --set pretrain.steps=500 --set lora.r=32
+#
+# LICENCE NOTE: microsoft/layoutlmv3-base weights are CC BY-NC-SA 4.0 (non-commercial).
+# =============================================================================
+
+data:
+  manifests:                     # datasets trained together (one classifier, one extractor per doc type)
+    # "Bad scan" versions made by `python prepare_noisy.py` (skew, blur, noise, stains, JPEG, ...)
+    # and re-OCR'd with docTR. Same pages, bundles, splits and labels as the clean sets.
+    - data/company_docs_noisy/manifest.jsonl
+    - data/synthetic_noisy/manifest.jsonl
+    # Clean sources (swap in to train/evaluate on clean renders):
+    # - data/company_docs/manifest.jsonl      # Company Documents (Kaggle, Apache-2.0) via `python prepare_data.py`
+    # - data/synthetic/manifest.jsonl         # synthetic bank bundles (generated if missing)
+  synthetic:
+    n_bundles: 1500               # ~3.7k pages, about the size of the company set
+    max_rows: 24
+    seed: 13
+  split_ratios: [0.7, 0.15, 0.15]  # train/val/test by doc_id when rows have no "split"
+  cache_images: false            # keep page tensors in RAM (small datasets only)
+
+model:
+  name: microsoft/layoutlmv3-base
+  max_seq_len: 512               # text tokens per window (+197 image tokens); long pages are windowed
+
+# Stage 1 — self-supervised domain pretraining of the backbone (all weights train)
+pretrain:
+  steps: 6000
+  batch_size: 16
+  lr: 5.0e-5
+  warmup: 0.06
+  mlm_ratio: 0.15                # fraction of words masked (whole-word spans)
+  span_p: 0.2                    # span length ~ Geometric(p), mean ~5 words
+  max_span: 10
+  mim_ratio: 0.4                 # fraction of 16x16 image patches masked (blocks)
+  mlm_weight: 1.0
+  mim_weight: 1.0
+
+# Adapters attached to the frozen backbone (one per task)
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  targets: [query, key, value]
+
+# Stage 2a — document classifier (LoRA 'cls' + page-sequence encoder)
+classifier:
+  doc_types: [invoice, purchase_order, shipping_order, inventory_report,      # company documents
+              bank_statement, cheque, pay_stub, utility_bill, other]             # synthetic bank documents
+  doc_encoder: transformer       # transformer | bilstm
+  dim: 256
+  layers: 2
+  heads: 4
+  dropout: 0.1
+  max_pages: 16                  # page-position embeddings (bundles here: 3-4 pages per order, 9 per stock month)
+  train_max_pages: 9             # random page window per bundle during training
+  epochs: 15
+  lr: 3.0e-4                     # LoRA
+  head_lr: 1.0e-3                # page projection + encoder + heads
+  first_page_weight: 2.0         # page loss weight = max(min_weight, first_page_weight * decay^p)
+  decay: 0.85                    #   p = page position inside its sub-document
+  min_weight: 0.5
+  boundary_weight: 0.5           # "page starts a new sub-document" head
+  label_smoothing: 0.05
+
+# Stage 2b — one extractor per doc type (LoRA 'ie_<type>' + tag head). Field names = OCR Tag values.
+extraction:
+  epochs: 25
+  batch_size: 16                 # windows per step
+  lr: 3.0e-4
+  head_lr: 1.0e-3
+  window_overlap: 64
+  o_weight: 0.5                  # loss weight of the "no field" tag
+  fields:                        # tags written by prepare_data.py; multi = list of values
+    invoice:
+      [order_id, customer_id, order_date, contact_name, address, city, postal_code, country, phone, fax,
+       {name: product_id, multi: true}, {name: product_name, multi: true}, {name: quantity, multi: true},
+       {name: unit_price, multi: true}, total_price]
+    purchase_order:
+      [order_id, order_date, customer_name,
+       {name: product_id, multi: true}, {name: product_name, multi: true}, {name: quantity, multi: true},
+       {name: unit_price, multi: true}]
+    shipping_order:
+      [order_id, ship_name, ship_address, ship_city, ship_region, ship_postal_code, ship_country,
+       customer_id, customer_name, employee_name, shipper_id, shipper_name, order_date, shipped_date,
+       {name: product_name, multi: true}, {name: quantity, multi: true}, {name: unit_price, multi: true},
+       {name: line_total, multi: true}, total_price]
+    inventory_report:
+      [report_month, {name: category, multi: true}, category_id,
+       {name: product_name, multi: true}, {name: units_sold, multi: true},
+       {name: units_in_stock, multi: true}, {name: unit_price, multi: true}]
+    bank_statement:
+      [bank_name, account_holder_name, account_number, statement_start_date, statement_end_date,
+       opening_balance, closing_balance, {name: transaction_date, multi: true}, {name: transaction_amount, multi: true}]
+    cheque: [payee_name, amount_numeric, amount_words, cheque_date, cheque_number, account_number]
+    pay_stub: [employer_name, employee_name, pay_date, gross_pay, net_pay]
+    utility_bill: [customer_name, account_number, bill_date, due_date, amount_due]
+
+serving:
+  review_threshold: 0.85         # page or field confidence below this -> needs_review
+
+output_dir: artifacts/pipeline   # saved serving bundle (backbone + adapters + heads)
